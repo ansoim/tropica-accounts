@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const labels = ['Done','Pending','Issue','Unmarked','N/A','Other'];
-const colors = ['#53ad91','#dfae51','#ce727e','#aba7bb','#819fc3','#ac8cc4'];
+const labels = ['Done','Pending','Issue','N/A','Other'];
+const colors = ['#53ad91','#dfae51','#ce727e','#819fc3','#ac8cc4'];
 let entries=[], notes=[], dates=[], owners=[], memberIds=new Map(), busy=false;
 const clean = value => String(value ?? '').trim();
 const esc = value => clean(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
