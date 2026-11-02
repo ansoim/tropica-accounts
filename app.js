@@ -114,16 +114,28 @@ async function readTab(name){
 let lastLive='';
 async function refresh(){
   if(busy)return;
-  busy=true;$('sync').disabled=true;
+  busy=true;
+  const button=$('sync');
+  button.disabled=true;
+  button.textContent='Refreshing…';
+  const visibleFeedback=new Promise(resolve=>setTimeout(resolve,700));
   try{
     const results=await Promise.allSettled(tabNames.map(readTab));
     if(results.some(r=>r.status==='rejected'))throw Error('Live sheet unavailable');
     load(results.map(r=>r.value));
-    lastLive=new Date().toLocaleTimeString();
-    $('message').textContent='Live Google Sheet · Updated '+lastLive+' · Checks every 30 seconds';
+    lastLive=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
+    const badge=document.createElement('span');
+    badge.className='updated-badge';
+    badge.textContent='Updated '+lastLive;
+    $('message').replaceChildren('Live Google Sheet · ',badge,' · Checks every 30 seconds');
   }catch{
     $('message').textContent=(lastLive?'Showing last live update at '+lastLive:'Showing the supplied Excel snapshot')+' · Live refresh unavailable. Check public viewer access and tab names.';
-  }finally{busy=false;$('sync').disabled=false;}
+  }finally{
+    await visibleFeedback;
+    button.textContent='Refresh now';
+    button.disabled=false;
+    busy=false;
+  }
 }
 load(window.WORKBOOK);
 $('message').textContent='Showing workbook snapshot · Checking live sheet…';
