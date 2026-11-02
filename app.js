@@ -28,7 +28,6 @@ function parse(tabs){
     const h=rows[0]||[];
     if(!/location/i.test(h[1]) || !/checklist activity/i.test(h[4])) continue;
     const cols=h.map(dateKey).map((d,i)=>[d,i]).filter(([d,i])=>d && i>=5);
-    if(!cols.length) continue;
     names.push(name);
     ids.set(name, String(gid ?? name));
     for(const [date,i] of cols){
@@ -129,6 +128,34 @@ async function readTab({gid,name}){
   if(response.headers.get('content-type')?.includes('text/html'))throw Error('Public access unavailable');
   return {gid,name,rows};
 }
+
+async function readWorkbook() {
+  const base = 'https://docs.google.com/spreadsheets/d/' + CONFIG.sheetId;
+  try {
+    const response = await fetch(base + '/export?format=xlsx&_ts=' + Date.now(), {
+      credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(18000)
+    });
+    if (!response.ok) throw Error('Workbook download failed');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw Error('Workbook export unavailable');
+    const book = XLSX.read(bytes, {type: 'array'});
+    return book.SheetNames.flatMap((name, index) => {
+      const metadata = book.Workbook?.Sheets?.[index];
+      if (metadata?.Hidden) return [];
+      const rows = XLSX.utils.sheet_to_json(book.Sheets[name], {
+        header: 1, raw: true, defval: '', range: 0
+      });
+      return [{name, rows, gid: metadata?.sheetId ?? name}];
+    });
+  } catch {
+    try {
+      const tabs = await discoverTabs();
+      return await Promise.all(tabs.map(readTab));
+    } catch {
+      throw Error('Google Sheet could not be read. Check Share → Anyone with the link → Viewer, then click Refresh now.');
+    }
+  }
+}
 let lastLive='';
 async function refresh(){
   if(busy)return;
@@ -138,17 +165,14 @@ async function refresh(){
   button.textContent='Refreshing…';
   const visibleFeedback=new Promise(resolve=>setTimeout(resolve,700));
   try{
-    const tabs=await discoverTabs();
-    const results=await Promise.allSettled(tabs.map(readTab));
-    if(results.some(r=>r.status==='rejected'))throw Error('Live sheet unavailable');
-    load(results.map(r=>r.value));
+    load(await readWorkbook());
     lastLive=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
     const badge=document.createElement('span');
     badge.className='updated-badge';
     badge.textContent='Updated '+lastLive;
     $('message').replaceChildren('Live Google Sheet · ',badge,' · '+owners.length+' employees · Checks every '+CONFIG.refreshSeconds+' seconds');
-  }catch{
-    $('message').textContent=(lastLive?'Showing last live update at '+lastLive:'Showing the supplied Excel snapshot')+' · Live refresh unavailable. Could not read the current workbook. Check public viewer access or retry.';
+  }catch(error){
+    $('message').textContent=(lastLive ? 'Refresh failed · Showing last successful read at '+lastLive : 'No live data loaded')+' · '+error.message;
   }finally{
     await visibleFeedback;
     button.textContent='Refresh now';
@@ -156,8 +180,8 @@ async function refresh(){
     busy=false;
   }
 }
-load(window.WORKBOOK);
-$('message').textContent='Showing workbook snapshot · Checking live sheet…';
+load([]);
+$('message').textContent='Loading current employee checklists…';
 $('sync').onclick=refresh;
 refresh();
 setInterval(()=>{if(!document.hidden)refresh();},CONFIG.refreshSeconds*1000);
