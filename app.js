@@ -2,8 +2,7 @@
 const $ = id => document.getElementById(id);
 const labels = ['Done','Pending','Issue','Unmarked','N/A','Other'];
 const colors = ['#53ad91','#dfae51','#ce727e','#aba7bb','#819fc3','#ac8cc4'];
-const tabNames = window.WORKBOOK.map(tab => tab.name);
-let entries=[], notes=[], dates=[], owners=[], busy=false;
+let entries=[], notes=[], dates=[], owners=[], memberIds=new Map(), busy=false;
 const clean = value => String(value ?? '').trim();
 const esc = value => clean(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const today = () => new Date().toLocaleDateString('sv-SE');
@@ -24,13 +23,14 @@ function bucket(value){
   return 'Other';
 }
 function parse(tabs){
-  const data=[], extra=[], days=new Set(), names=[];
-  for(const {name,rows} of tabs){
+  const data=[], extra=[], days=new Set(), names=[], ids=new Map();
+  for(const {gid,name,rows} of tabs){
     const h=rows[0]||[];
     if(!/location/i.test(h[1]) || !/checklist activity/i.test(h[4])) continue;
     const cols=h.map(dateKey).map((d,i)=>[d,i]).filter(([d,i])=>d && i>=5);
     if(!cols.length) continue;
     names.push(name);
+    ids.set(name, String(gid ?? name));
     for(const [date,i] of cols){
       days.add(date);
       for(const r of rows.slice(1)){
@@ -40,8 +40,7 @@ function parse(tabs){
       }
     }
   }
-  if(!data.length) throw Error('No checklist rows found. Check the sheet ID, headers A–E and date columns from F onward.');
-  entries=data;notes=extra;dates=[...days].sort();owners=names;
+  entries=data;notes=extra;dates=[...days].sort();owners=names;memberIds=ids;
 }
 function options(id,values,first,preferred){
   const el=$(id);
@@ -50,9 +49,12 @@ function options(id,values,first,preferred){
 }
 function load(tabs){
   const prev=$('day').value, owner=$('person').value;
+  const selectedId=memberIds.get(owner);
   parse(tabs);
   options('day',dates,null,dates.includes(prev)?prev:dates.filter(d=>d<=today()).at(-1)||dates[0]);
-  options('person',owners,'All members',owner);
+  // Google worksheet IDs survive renames; deleted selections return to All members.
+  const currentOwner=owners.find(name=>memberIds.get(name)===selectedId);
+  options('person',owners,'All members',currentOwner || '');
   render();
 }
 function progress(rows){
@@ -102,14 +104,30 @@ function csvRows(text){
   if(row.length||field)rows.push([...row,field]);
   return rows;
 }
-async function readTab(name){
+// Google’s HTML viewer lists worksheet IDs and titles, including renamed tabs.
+async function discoverTabs(){
+  const url=new URL('https://docs.google.com/spreadsheets/d/'+CONFIG.sheetId+'/htmlview');
+  url.searchParams.set('_ts',Date.now());
+  const response=await fetch(url,{cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(18000)});
+  if(!response.ok)throw Error('Sheet list unavailable');
+  const doc=new DOMParser().parseFromString(await response.text(),'text/html');
+  const tabs=new Map();
+  for(const item of doc.querySelectorAll('[id^="sheet-button-"]')){
+    const gid=item.id.slice('sheet-button-'.length);
+    const name=(item.querySelector('a')||item).textContent.trim();
+    if(/^\d+$/.test(gid)&&name)tabs.set(gid,{gid,name});
+  }
+  if(!tabs.size)throw Error('Sheet list unavailable');
+  return [...tabs.values()];
+}
+async function readTab({gid,name}){
   const url=new URL('https://docs.google.com/spreadsheets/d/'+CONFIG.sheetId+'/gviz/tq');
-  url.search=new URLSearchParams({sheet:name,headers:'1',tqx:'out:csv',_ts:String(Date.now())});
+  url.search=new URLSearchParams({gid,headers:'1',tqx:'out:csv',_ts:String(Date.now())});
   const response=await fetch(url,{cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(18000)});
   if(!response.ok)throw Error('Sheet unavailable');
   const rows=csvRows(await response.text());
-  if(!/checklist activity/i.test(rows[0]?.[4]||'')||!rows[0].slice(5).some(v=>dateKey(v)))throw Error('Unexpected checklist format');
-  return {name,rows};
+  if(response.headers.get('content-type')?.includes('text/html'))throw Error('Public access unavailable');
+  return {gid,name,rows};
 }
 let lastLive='';
 async function refresh(){
@@ -120,16 +138,17 @@ async function refresh(){
   button.textContent='Refreshing…';
   const visibleFeedback=new Promise(resolve=>setTimeout(resolve,700));
   try{
-    const results=await Promise.allSettled(tabNames.map(readTab));
+    const tabs=await discoverTabs();
+    const results=await Promise.allSettled(tabs.map(readTab));
     if(results.some(r=>r.status==='rejected'))throw Error('Live sheet unavailable');
     load(results.map(r=>r.value));
     lastLive=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
     const badge=document.createElement('span');
     badge.className='updated-badge';
     badge.textContent='Updated '+lastLive;
-    $('message').replaceChildren('Live Google Sheet · ',badge,' · Checks every 30 seconds');
+    $('message').replaceChildren('Live Google Sheet · ',badge,' · '+owners.length+' employees · Checks every '+CONFIG.refreshSeconds+' seconds');
   }catch{
-    $('message').textContent=(lastLive?'Showing last live update at '+lastLive:'Showing the supplied Excel snapshot')+' · Live refresh unavailable. Check public viewer access and tab names.';
+    $('message').textContent=(lastLive?'Showing last live update at '+lastLive:'Showing the supplied Excel snapshot')+' · Live refresh unavailable. Could not read the current workbook. Check public viewer access or retry.';
   }finally{
     await visibleFeedback;
     button.textContent='Refresh now';
